@@ -526,7 +526,7 @@ echo "[*] Bug Bounty Workflow Completed for $TARGET. Results saved in $OUTPUT_DI
 Let me know if you'd like further refinements!
 
 
----
+```bash
 #!/bin/bash
 
 TARGET=$1
@@ -620,4 +620,4 @@ hydra -L users.txt -P passwords.txt $TARGET http-post-form "/login:username=^USE
 
 echo "[*] Bug Bounty Workflow Completed for $TARGET. Results saved in $OUTPUT_DIR"
 
----
+```
