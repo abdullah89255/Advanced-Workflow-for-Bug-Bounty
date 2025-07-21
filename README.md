@@ -621,3 +621,112 @@ hydra -L users.txt -P passwords.txt $TARGET http-post-form "/login:username=^USE
 echo "[*] Bug Bounty Workflow Completed for $TARGET. Results saved in $OUTPUT_DIR"
 
 ```
+
+
+```bash
+#!/bin/bash
+
+# Configuration
+TARGET="$1"
+OUTPUT_DIR="./bug_bounty_results/$TARGET"
+WORDLIST_DIR="./wordlists"  # Change this to your wordlist directory
+
+# Create output directory
+mkdir -p "$OUTPUT_DIR"
+rm -rf "$OUTPUT_DIR"/* 2>/dev/null
+
+# Logging function
+log() {
+    echo "[*] $1"
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Check for required tools
+REQUIRED_TOOLS=(
+    "findomain" "subfinder" "amass" "dnsx" "httpx" "naabu" "nuclei" 
+    "subjack" "ffuf" "gowitness" "dalfox" "sqlmap" "arjun" "hydra" 
+    "waybackurls" "gau" "qsreplace" "gf" "uro"
+)
+
+log "Checking for required tools..."
+for tool in "${REQUIRED_TOOLS[@]}"; do
+    if ! command_exists "$tool"; then
+        log "Error: $tool is not installed. Please install it first."
+        exit 1
+    fi
+done
+
+# Step 1: Subdomain Enumeration (Parallel)
+log "Enumerating subdomains..."
+{
+    findomain -t "$TARGET" -o -u "$OUTPUT_DIR/findomain.txt" &
+    subfinder -d "$TARGET" -o "$OUTPUT_DIR/subfinder.txt" &
+    amass enum -passive -d "$TARGET" -o "$OUTPUT_DIR/amass.txt" &
+    wait
+} > "$OUTPUT_DIR/subdomain_enum.log" 2>&1
+
+# Merge and deduplicate subdomains
+cat "$OUTPUT_DIR"/{findomain,subfinder,amass}.txt | sort -u > "$OUTPUT_DIR/all_subdomains.txt"
+
+# Step 2: DNS Validation
+log "Validating DNS..."
+dnsx -l "$OUTPUT_DIR/all_subdomains.txt" -o "$OUTPUT_DIR/valid_subdomains.txt" > "$OUTPUT_DIR/dnsx.log" 2>&1
+
+# Step 3: HTTP Probing (Live hosts)
+log "Probing HTTP servers..."
+httpx -l "$OUTPUT_DIR/valid_subdomains.txt" -o "$OUTPUT_DIR/live_hosts.txt" > "$OUTPUT_DIR/httpx.log" 2>&1
+
+# Step 4: Waybackurls + GAU (Historical URLs)
+log "Collecting historical URLs..."
+cat "$OUTPUT_DIR/live_hosts.txt" | waybackurls > "$OUTPUT_DIR/wayback.txt"
+cat "$OUTPUT_DIR/live_hosts.txt" | gau > "$OUTPUT_DIR/gau.txt"
+cat "$OUTPUT_DIR"/{wayback,gau}.txt | uro > "$OUTPUT_DIR/all_urls.txt"
+
+# Step 5: Parameter Extraction
+log "Extracting parameters..."
+cat "$OUTPUT_DIR/all_urls.txt" | qsreplace -a > "$OUTPUT_DIR/urls_with_params.txt"
+
+# Step 6: Vulnerability Scanning
+log "Scanning for XSS..."
+dalfox file "$OUTPUT_DIR/urls_with_params.txt" -o "$OUTPUT_DIR/xss_results.txt" > "$OUTPUT_DIR/dalfox.log" 2>&1
+
+log "Scanning for SQLi..."
+sqlmap -m "$OUTPUT_DIR/urls_with_params.txt" --batch --output-dir="$OUTPUT_DIR/sqlmap_results" > "$OUTPUT_DIR/sqlmap.log" 2>&1
+
+log "Scanning for LFI/SSRF/Redirects..."
+gf lfi "$OUTPUT_DIR/all_urls.txt" > "$OUTPUT_DIR/lfi_results.txt"
+gf ssrf "$OUTPUT_DIR/all_urls.txt" > "$OUTPUT_DIR/ssrf_results.txt"
+gf redirect "$OUTPUT_DIR/all_urls.txt" > "$OUTPUT_DIR/redirect_results.txt"
+
+# Step 7: Nuclei (Template-based scanning)
+log "Running Nuclei scans..."
+nuclei -l "$OUTPUT_DIR/live_hosts.txt" -t "$HOME/nuclei-templates" -o "$OUTPUT_DIR/nuclei_results.txt" > "$OUTPUT_DIR/nuclei.log" 2>&1
+
+# Step 8: Port Scanning
+log "Scanning open ports..."
+naabu -iL "$OUTPUT_DIR/valid_subdomains.txt" -o "$OUTPUT_DIR/ports.txt" > "$OUTPUT_DIR/naabu.log" 2>&1
+
+# Step 9: Subdomain Takeover Check
+log "Checking for subdomain takeovers..."
+subjack -w "$OUTPUT_DIR/valid_subdomains.txt" -t 50 -timeout 30 -o "$OUTPUT_DIR/takeover_results.txt" -ssl > "$OUTPUT_DIR/subjack.log" 2>&1
+
+# Step 10: Content Discovery (FFuF)
+log "Running content discovery..."
+ffuf -u "https://$TARGET/FUZZ" -w "$WORDLIST_DIR/common.txt" -o "$OUTPUT_DIR/ffuf_results.json" > "$OUTPUT_DIR/ffuf.log" 2>&1
+
+# Step 11: Screenshots (GoWitness)
+log "Taking screenshots..."
+gowitness file -f "$OUTPUT_DIR/live_hosts.txt" --destination "$OUTPUT_DIR/screenshots/" > "$OUTPUT_DIR/gowitness.log" 2>&1
+
+# Step 12: Broken Auth Testing (Hydra)
+log "Testing for broken authentication..."
+hydra -L "$WORDLIST_DIR/users.txt" -P "$WORDLIST_DIR/passwords.txt" "$TARGET" http-post-form "/login:username=^USER^&password=^PASS^:F=incorrect" -o "$OUTPUT_DIR/hydra_results.txt" > "$OUTPUT_DIR/hydra.log" 2>&1
+
+log "Scan completed! Results saved in: $OUTPUT_DIR"
+
+
+```
