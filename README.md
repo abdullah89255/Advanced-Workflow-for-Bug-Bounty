@@ -524,3 +524,100 @@ echo "[*] Bug Bounty Workflow Completed for $TARGET. Results saved in $OUTPUT_DI
 - Always confirm you have explicit permission before running any security tests.
 
 Let me know if you'd like further refinements!
+
+
+---
+#!/bin/bash
+
+TARGET=$1
+OUTPUT_DIR="./bug_bounty_results/$TARGET"
+
+# Cleanup and create output directory
+rm -rf $OUTPUT_DIR/*
+mkdir -p $OUTPUT_DIR
+
+echo "[*] Starting Bug Bounty Workflow for $TARGET"
+
+# Check for required tools
+REQUIRED_TOOLS=("findomain" "subfinder" "amass" "dnsx" "httpx" "naabu" "nuclei" "subjack" "ffuf" "gowitness" "dalfox" "sqlmap" "arjun" "hydra" "waybackurls" "gau" "qsreplace" "gf" "uro")
+for tool in "${REQUIRED_TOOLS[@]}"; do
+    if ! command -v $tool &> /dev/null; then
+        echo "Error: $tool is not installed. Please install it first."
+        exit 1
+    fi
+done
+
+# Step 1: Subdomain Enumeration (Parallel)
+echo "[*] Enumerating Subdomains..."
+findomain -t $TARGET -o -u $OUTPUT_DIR/findomain.txt > $OUTPUT_DIR/findomain.log 2>&1 &
+subfinder -d $TARGET -o $OUTPUT_DIR/subfinder.txt > $OUTPUT_DIR/subfinder.log 2>&1 &
+amass enum -passive -d $TARGET -o $OUTPUT_DIR/amass.txt > $OUTPUT_DIR/amass.log 2>&1 &
+wait
+cat $OUTPUT_DIR/*.txt | sort -u > $OUTPUT_DIR/all_subdomains.txt
+
+# Step 2: DNS Validation
+echo "[*] Validating DNS..."
+dnsx -l $OUTPUT_DIR/all_subdomains.txt -o $OUTPUT_DIR/validated_subdomains.txt > $OUTPUT_DIR/dnsx.log 2>&1
+
+# Step 3: HTTP Probing
+echo "[*] Probing HTTP Servers..."
+httpx -l $OUTPUT_DIR/validated_subdomains.txt -o $OUTPUT_DIR/live_http.txt > $OUTPUT_DIR/httpx.log 2>&1
+
+# Step 4: Waybackurls and GAU for Historical URL Collection
+echo "[*] Collecting Historical URLs..."
+cat $OUTPUT_DIR/live_http.txt | waybackurls > $OUTPUT_DIR/waybackurls.txt
+cat $OUTPUT_DIR/live_http.txt | gau > $OUTPUT_DIR/gau.txt
+cat $OUTPUT_DIR/waybackurls.txt $OUTPUT_DIR/gau.txt | sort -u > $OUTPUT_DIR/raw_urls.txt
+
+# Step 5: Deduplicate URLs using uro
+echo "[*] Deduplicating URLs..."
+cat $OUTPUT_DIR/raw_urls.txt | uro > $OUTPUT_DIR/all_urls.txt
+
+# Step 6: Extract Parameters for Testing
+echo "[*] Extracting Parameters..."
+cat $OUTPUT_DIR/all_urls.txt | grep -Eo 'https?://[^/"]+' | sort -u > $OUTPUT_DIR/base_urls.txt
+cat $OUTPUT_DIR/all_urls.txt | qsreplace -a > $OUTPUT_DIR/urls_with_params.txt
+
+# Step 7: Vulnerability Scanning on Collected URLs
+echo "[*] Scanning for XSS..."
+dalfox file $OUTPUT_DIR/urls_with_params.txt -o $OUTPUT_DIR/xss_results.txt > $OUTPUT_DIR/dalfox.log 2>&1
+
+echo "[*] Scanning for SQLi..."
+sqlmap -m $OUTPUT_DIR/urls_with_params.txt --batch --output-dir=$OUTPUT_DIR/sqlmap_results > $OUTPUT_DIR/sqlmap.log 2>&1
+
+echo "[*] Scanning for LFI..."
+gf lfi $OUTPUT_DIR/all_urls.txt > $OUTPUT_DIR/lfi_results.txt
+
+echo "[*] Scanning for SSRF..."
+gf ssrf $OUTPUT_DIR/all_urls.txt > $OUTPUT_DIR/ssrf_results.txt
+
+echo "[*] Scanning for Open Redirects..."
+gf redirect $OUTPUT_DIR/all_urls.txt > $OUTPUT_DIR/redirect_results.txt
+
+# Step 8: Port Scanning
+echo "[*] Scanning Open Ports..."
+naabu -iL $OUTPUT_DIR/validated_subdomains.txt -o $OUTPUT_DIR/open_ports.txt > $OUTPUT_DIR/naabu.log 2>&1
+
+# Step 9: Nuclei for Vulnerability Scanning
+echo "[*] Running Nuclei Scans..."
+nuclei -l $OUTPUT_DIR/live_http.txt -t nuclei-templates/ -o $OUTPUT_DIR/nuclei_results.txt > $OUTPUT_DIR/nuclei.log 2>&1
+
+# Step 10: Subdomain Takeover Detection
+echo "[*] Checking for Subdomain Takeovers..."
+subjack -w $OUTPUT_DIR/validated_subdomains.txt -t 50 -timeout 30 -o $OUTPUT_DIR/takeover_results.txt -ssl > $OUTPUT_DIR/subjack.log 2>&1
+
+# Step 11: Content Discovery
+echo "[*] Discovering Content..."
+ffuf -u https://$TARGET/FUZZ -w wordlist.txt -o $OUTPUT_DIR/ffuf_results.json > $OUTPUT_DIR/ffuf.log 2>&1
+
+# Step 12: Screenshots
+echo "[*] Capturing Screenshots..."
+gowitness file -f $OUTPUT_DIR/live_http.txt --destination $OUTPUT_DIR/screenshots/ > $OUTPUT_DIR/gowitness.log 2>&1
+
+# Step 13: Broken Authentication Testing
+echo "[*] Testing for Broken Authentication..."
+hydra -L users.txt -P passwords.txt $TARGET http-post-form "/login:username=^USER^&password=^PASS^:F=incorrect" -o $OUTPUT_DIR/hydra_results.txt > $OUTPUT_DIR/hydra.log 2>&1
+
+echo "[*] Bug Bounty Workflow Completed for $TARGET. Results saved in $OUTPUT_DIR"
+
+---
